@@ -2,7 +2,9 @@ import html
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -11,6 +13,8 @@ from urllib.request import Request, urlopen
 app = FastAPI()
 
 API_URL = "https://data.fingrid.fi/api/datasets"
+DATA_API_URL = "https://data.fingrid.fi/api/datasets/{dataset_id}/data"
+DATASET_DOCS_URL = "https://developer-data.fingrid.fi/api-details#api=avoindata-api&operation=GetDatasetData"
 API_KEY_ENV = "FINGRID_API_KEY"
 CACHE_TTL_SECONDS = 300
 PAGE_SIZE = 500
@@ -128,11 +132,58 @@ def render_table_rows(datasets: list[dict]) -> str:
                     f"<td>{groups}</td>",
                     f"<td>{formats}</td>",
                     f"<td>{modified}</td>",
+              (
+                "<td class=\"actions\">"
+                f"<a class=\"action-link\" href=\"{DATASET_DOCS_URL}\" target=\"_blank\" rel=\"noreferrer noopener\">Docs</a>"
+                f"<button class=\"action-button\" data-dataset-id=\"{dataset_id}\" data-dataset-name=\"{name}\">Last Hour</button>"
+                "</td>"
+              ),
                     "</tr>",
                 ]
             )
         )
     return "\n".join(rows)
+
+
+def iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_last_hour_dataset_data(dataset_id: int, api_key: str) -> dict:
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(hours=1)
+    start_str = iso_utc(start_time)
+    end_str = iso_utc(end_time)
+    params = {
+        "startTime": start_str,
+        "endTime": end_str,
+        "pageSize": 200,
+    }
+    query = urlencode(params)
+    request_url = DATA_API_URL.format(dataset_id=dataset_id)
+    full_url = f"{request_url}?{query}"
+    headers = {
+        "Cache-Control": "no-cache",
+        "x-api-key": api_key,
+        "Accept": "application/json",
+    }
+    request = Request(full_url, headers=headers)
+    with urlopen(request, timeout=30) as response:
+        payload = response.read().decode("utf-8")
+    body = json.loads(payload)
+    curl_command = (
+        "curl -sS -H 'Cache-Control: no-cache' "
+        "-H 'x-api-key: $FINGRID_API_KEY' "
+        f"'{full_url}'"
+    )
+    return {
+        "datasetId": dataset_id,
+        "startTime": start_str,
+        "endTime": end_str,
+        "requestUrl": full_url,
+        "curl": curl_command,
+        "response": body,
+    }
 
 
 def render_page(datasets: list[dict]) -> str:
@@ -281,6 +332,92 @@ def render_page(datasets: list[dict]) -> str:
       white-space: nowrap;
     }}
     .muted {{ color: var(--muted); }}
+    .actions {{
+      min-width: 200px;
+      white-space: nowrap;
+    }}
+    .action-link {{
+      display: inline-block;
+      text-decoration: none;
+      color: #0b5b55;
+      font-weight: 600;
+      margin-right: 10px;
+      padding: 6px 8px;
+      border-radius: 8px;
+    }}
+    .action-link:hover {{
+      background: rgba(11, 91, 85, 0.1);
+    }}
+    .action-button {{
+      border: 0;
+      border-radius: 10px;
+      background: #0f766e;
+      color: white;
+      padding: 8px 11px;
+      font: inherit;
+      cursor: pointer;
+    }}
+    .action-button:hover {{
+      background: #0b5b55;
+    }}
+    dialog {{
+      width: min(980px, calc(100vw - 20px));
+      border: 0;
+      border-radius: 16px;
+      padding: 0;
+      box-shadow: 0 24px 70px rgba(15, 18, 20, 0.3);
+    }}
+    dialog::backdrop {{
+      background: rgba(23, 29, 33, 0.46);
+      backdrop-filter: blur(2px);
+    }}
+    .dialog-shell {{
+      padding: 18px;
+      background: #fffdf9;
+    }}
+    .dialog-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }}
+    .dialog-title {{
+      margin: 0;
+      font-size: 1.1rem;
+    }}
+    .dialog-close {{
+      border: 0;
+      background: transparent;
+      color: #42535a;
+      cursor: pointer;
+      font: inherit;
+      padding: 6px 8px;
+      border-radius: 8px;
+    }}
+    .dialog-close:hover {{
+      background: rgba(66, 83, 90, 0.1);
+    }}
+    .code-block {{
+      margin: 8px 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fcfaf5;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      font-size: 0.85rem;
+      line-height: 1.45;
+      font-family: Menlo, Monaco, Consolas, monospace;
+      white-space: pre;
+    }}
+    .dialog-section-title {{
+      margin: 14px 0 6px;
+      color: #3b4c53;
+      font-size: 0.83rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }}
     .hidden {{ display: none; }}
     .footer {{
       margin-top: 14px;
@@ -326,6 +463,7 @@ def render_page(datasets: list[dict]) -> str:
             <th>Groups</th>
             <th>Formats</th>
             <th>Modified</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody id="datasetRows">
@@ -335,10 +473,28 @@ def render_page(datasets: list[dict]) -> str:
     </div>
     <p class="footer">Reload the page to fetch the latest dataset catalog from Fingrid.</p>
   </main>
+  <dialog id="datasetDialog">
+    <section class="dialog-shell">
+      <div class="dialog-head">
+        <h2 class="dialog-title" id="dialogTitle">Dataset Details</h2>
+        <button class="dialog-close" id="dialogClose">Close</button>
+      </div>
+      <div class="dialog-section-title">cURL Request</div>
+      <pre class="code-block" id="curlBlock">Loading...</pre>
+      <div class="dialog-section-title">API Response</div>
+      <pre class="code-block" id="responseBlock">Loading...</pre>
+    </section>
+  </dialog>
   <script>
     const searchInput = document.getElementById('searchInput');
     const visibleCount = document.getElementById('visibleCount');
     const rows = Array.from(document.querySelectorAll('#datasetRows tr'));
+    const actionButtons = Array.from(document.querySelectorAll('.action-button'));
+    const datasetDialog = document.getElementById('datasetDialog');
+    const dialogTitle = document.getElementById('dialogTitle');
+    const dialogClose = document.getElementById('dialogClose');
+    const curlBlock = document.getElementById('curlBlock');
+    const responseBlock = document.getElementById('responseBlock');
 
     function applyFilter() {{
       const query = searchInput.value.trim().toLowerCase();
@@ -354,6 +510,60 @@ def render_page(datasets: list[dict]) -> str:
     }}
 
     searchInput.addEventListener('input', applyFilter);
+
+    function prettyJson(value) {{
+      try {{
+        return JSON.stringify(value, null, 2);
+      }} catch (_error) {{
+        return String(value);
+      }}
+    }}
+
+    async function showDatasetDialog(datasetId, datasetName) {{
+      dialogTitle.textContent = `Dataset ${{datasetId}}: ${{datasetName}}`;
+      curlBlock.textContent = 'Loading cURL request...';
+      responseBlock.textContent = 'Loading API response...';
+      if (!datasetDialog.open) {{
+        datasetDialog.showModal();
+      }}
+
+      try {{
+        const response = await fetch(`/api/datasets/${{datasetId}}/last-hour`);
+        const body = await response.json();
+        if (!response.ok) {{
+          curlBlock.textContent = body.curl || 'Request generation failed';
+          responseBlock.textContent = prettyJson(body);
+          return;
+        }}
+        curlBlock.textContent = body.curl || 'No cURL generated';
+        responseBlock.textContent = prettyJson(body.response);
+      }} catch (error) {{
+        curlBlock.textContent = 'Failed to fetch data';
+        responseBlock.textContent = String(error);
+      }}
+    }}
+
+    for (const button of actionButtons) {{
+      button.addEventListener('click', () => {{
+        const datasetId = button.getAttribute('data-dataset-id');
+        const datasetName = button.getAttribute('data-dataset-name') || 'Unnamed dataset';
+        showDatasetDialog(datasetId, datasetName);
+      }});
+    }}
+
+    dialogClose.addEventListener('click', () => datasetDialog.close());
+    datasetDialog.addEventListener('click', (event) => {{
+      const bounds = datasetDialog.getBoundingClientRect();
+      const clickedOutside = (
+        event.clientX < bounds.left ||
+        event.clientX > bounds.right ||
+        event.clientY < bounds.top ||
+        event.clientY > bounds.bottom
+      );
+      if (clickedOutside) {{
+        datasetDialog.close();
+      }}
+    }});
   </script>
 </body>
 </html>
@@ -385,3 +595,46 @@ async def index():
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/api/datasets/{dataset_id}/last-hour")
+async def dataset_last_hour(dataset_id: int):
+  try:
+    api_key = get_api_key()
+    payload = fetch_last_hour_dataset_data(dataset_id, api_key)
+    return payload
+  except HTTPError as error:
+    error_body = ""
+    try:
+      error_body = error.read().decode("utf-8")
+    except Exception:
+      error_body = ""
+    return JSONResponse(
+      status_code=error.code,
+      content={
+        "error": f"Fingrid API error: {error.reason}",
+        "datasetId": dataset_id,
+        "responseText": error_body,
+        "curl": (
+          "curl -sS -H 'Cache-Control: no-cache' "
+          "-H 'x-api-key: $FINGRID_API_KEY' "
+          f"'https://data.fingrid.fi/api/datasets/{dataset_id}/data?startTime=<ISO>&endTime=<ISO>&pageSize=200'"
+        ),
+      },
+    )
+  except URLError as error:
+    return JSONResponse(
+      status_code=502,
+      content={
+        "error": f"Unable to reach Fingrid API: {error.reason}",
+        "datasetId": dataset_id,
+      },
+    )
+  except Exception as error:
+    return JSONResponse(
+      status_code=500,
+      content={
+        "error": str(error),
+        "datasetId": dataset_id,
+      },
+    )
