@@ -2,13 +2,9 @@ import html
 import json
 import os
 import time
-from flask import Flask
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-
-
-app = Flask(__name__)
 
 API_URL = "https://data.fingrid.fi/api/datasets"
 API_KEY_ENV = "FINGRID_API_KEY"
@@ -361,8 +357,8 @@ def render_page(datasets: list[dict]) -> str:
     return page
 
 
-@app.route("/", methods=["GET"])
-def index():
+def handler(request):
+    """Vercel serverless handler for the Fingrid viewer."""
     try:
         api_key = get_api_key()
     except RuntimeError as error:
@@ -370,20 +366,11 @@ def index():
 
     try:
         datasets = fetch_datasets(api_key)
-        html = render_page(datasets)
-        return html, 200
+        page = render_page(datasets)
+        return page, 200, {"Content-Type": "text/html; charset=utf-8"}
     except HTTPError as error:
         return f"<h1>Fingrid API Error</h1><p>Status {error.code}: {error.reason}</p>", 502
     except URLError as error:
         return f"<h1>Connection Error</h1><p>Unable to reach Fingrid API: {error.reason}</p>", 502
     except Exception as error:
         return f"<h1>Viewer Error</h1><p>{error}</p>", 500
-
-
-@app.route("/api/health", methods=["GET"])
-def health():
-    return {"status": "ok"}, 200
-
-
-if __name__ == "__main__":
-    app.run(debug=False)
