@@ -2,9 +2,13 @@ import html
 import json
 import os
 import time
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+app = FastAPI()
 
 API_URL = "https://data.fingrid.fi/api/datasets"
 API_KEY_ENV = "FINGRID_API_KEY"
@@ -357,20 +361,27 @@ def render_page(datasets: list[dict]) -> str:
     return page
 
 
-def handler(request):
-    """Vercel serverless handler for the Fingrid viewer."""
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    """Render the Fingrid dataset viewer."""
     try:
         api_key = get_api_key()
     except RuntimeError as error:
-        return f"<h1>Configuration Error</h1><p>{error}</p>", 500
+        return f"<h1>Configuration Error</h1><p>{error}</p>"
 
     try:
         datasets = fetch_datasets(api_key)
         page = render_page(datasets)
-        return page, 200, {"Content-Type": "text/html; charset=utf-8"}
+        return page
     except HTTPError as error:
-        return f"<h1>Fingrid API Error</h1><p>Status {error.code}: {error.reason}</p>", 502
+        return f"<h1>Fingrid API Error</h1><p>Status {error.code}: {error.reason}</p>"
     except URLError as error:
-        return f"<h1>Connection Error</h1><p>Unable to reach Fingrid API: {error.reason}</p>", 502
+        return f"<h1>Connection Error</h1><p>Unable to reach Fingrid API: {error.reason}</p>"
     except Exception as error:
-        return f"<h1>Viewer Error</h1><p>{error}</p>", 500
+        return f"<h1>Viewer Error</h1><p>{error}</p>"
+
+
+@app.get("/api/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok"}
